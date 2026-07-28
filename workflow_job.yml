@@ -1,0 +1,28 @@
+resources:
+  jobs:
+    pipeline_macro_bcb:
+      name: pipeline_macro_bcb
+      tasks:
+        - task_key: 01_bronze
+          spark_python_task:
+            python_file: /Workspace/Users/j.augusto.steixeira@gmail.com/bcb-databricks-pipeline/src/01_bronze_ingestion.py
+          environment_key: Default
+        - task_key: 02_silver
+          depends_on:
+            - task_key: 01_bronze
+          spark_python_task:
+            python_file: /Workspace/Users/j.augusto.steixeira@gmail.com/bcb-databricks-pipeline/src/02_silver_transformation.py
+          environment_key: Default
+        - task_key: 03_gold
+          depends_on:
+            - task_key: 02_silver
+          spark_python_task:
+            python_file: /Workspace/Users/j.augusto.steixeira@gmail.com/bcb-databricks-pipeline/src/03_gold_aggregation.py
+          environment_key: Default
+      queue:
+        enabled: true
+      environments:
+        - environment_key: Default
+          spec:
+            environment_version: "5"
+      performance_target: PERFORMANCE_OPTIMIZED
