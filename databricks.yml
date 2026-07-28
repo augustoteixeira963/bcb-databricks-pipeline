@@ -1,0 +1,45 @@
+# Databricks Asset Bundle (DAB) - Infrastructure as Code (IaC)
+# Documentação: https://docs.databricks.com/en/dev-tools/bundles/index.html
+
+bundle:
+  name: bcb-databricks-pipeline
+
+resources:
+  jobs:
+    bcb_macro_pipeline_workflow:
+      name: "Pipeline BCB Macro - SELIC e IPCA (DAB Deployment)"
+      description: "Workflow orquestrado da Arquitetura Medalhão consumindo dados das séries históricas do BCB."
+      
+      tasks:
+        - task_key: 01_bronze
+          description: "Ingestão incremental dos arquivos JSON do Unity Catalog Volume para tabelas Bronze via Auto Loader."
+          spark_python_task:
+            python_file: src/01_bronze_ingestion.py
+          
+        - task_key: 02_silver
+          description: "Limpeza, padronização de datas, tipagem e carga idempotente via MERGE na camada Silver."
+          depends_on:
+            - task_key: 01_bronze
+          spark_python_task:
+            python_file: src/02_silver_transformation.py
+
+        - task_key: 03_gold
+          description: "Consolidação analítica mensal com cálculo de Juro Real e IPCA Acumulado 12M via Window Functions."
+          depends_on:
+            - task_key: 02_silver
+          spark_python_task:
+            python_file: src/03_gold_aggregation.py
+
+targets:
+  dev:
+    default: true
+    mode: development
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+
+  prod:
+    mode: production
+    workspace:
+      root_path: /Workspace/Production/.bundle/${bundle.name}/${bundle.target}
+    run_as:
+      user_name: ${workspace.current_user.userName}
