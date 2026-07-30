@@ -68,6 +68,40 @@ O pipeline foi estruturado para garantir escalabilidade, rastreabilidade e facil
 
 ---
 
+## Ferramentas e Tecnologias Utilizadas
+
+Abaixo está a relação de todas as ferramentas e tecnologias empregadas no projeto, com a justificativa técnica e a forma como foram aplicadas:
+
+1. **Python (`requests` & `urllib3`)**:
+   - **Como foi usada:** Na construção do script de extração local (`extract/00_extracao_local.py`).
+   - **Por que foi usada:** Para consumir a API REST do Banco Central do Brasil com tratamento de erros de rede, retentativas com *backoff* exponencial e injeção de *headers* para prevenção do erro 406 (bloqueio antibot).
+
+2. **Databricks SDK para Python (`databricks-sdk`)**:
+   - **Como foi usada:** No script de upload automatizado (`extract/01_upload_to_volume.py`).
+   - **Por que foi usada:** Para realizar a transferência programática dos arquivos brutos para o Volume do Unity Catalog via Files API, eliminando processos manuais de drag-and-drop.
+
+3. **Databricks & Unity Catalog**:
+   - **Como foi usada:** Como plataforma de Lakehouse para governança de arquivos brutos em Volumes e registro unificado das tabelas nas camadas Bronze, Silver e Gold.
+   - **Por que foi usada:** Para fornecer governança centralizada, controle de acesso e ambiente Serverless Compute para execução das cargas.
+
+4. **PySpark & Delta Lake**:
+   - **Como foi usada:** No processamento de dados nas três camadas da esteira Medalhão.
+   - **Por que foi usada:** O Auto Loader (`cloudFiles`) viabilizou a ingestão incremental com gerenciamento de *checkpoints*, o Delta Lake garantiu transações ACID com suporte à carga idempotente via `MERGE INTO`, e as *Window Functions* permitiram a composição matemática de juros compostos.
+
+5. **Databricks Asset Bundles (DABs) & Databricks CLI**:
+   - **Como foi usada:** No arquivo `databricks.yml` e na execução dos comandos de deploy e execução remota (`databricks bundle deploy` / `run`).
+   - **Por que foi usada:** Para implementar Infraestrutura como Código (IaC), permitindo o versionamento e a automação do deploy do pipeline.
+
+6. **Power BI Desktop**:
+   - **Como foi usada:** Na camada de consumo final, conectando à tabela `gold_mensal` via conector nativo Databricks.
+   - **Por que foi usada:** Para viabilizar a criação de relatórios visuais e dashboards executivos de acompanhamento da inflação e juro real.
+
+7. **Antigravity (Google DeepMind AI Agent)**:
+   - **Como foi usada:** Atuou como assistente de IA em formato de mentoria técnica e programação em par (*pair programming*) durante o desenvolvimento.
+   - **Por que foi usada:** Auxiliou no desenho da arquitetura, refatoração de código no padrão PEP-8, tratamento de incompatibilidades do bundle com o ambiente Serverless, estruturação do plano de testes de Data Quality e padronização da documentação.
+
+---
+
 ## Estratégia de Backfill (Diferencial)
 
 Para reprocessamento ou carga histórica retroativa (backfill), o pipeline adota a seguinte estratégia por camada:
