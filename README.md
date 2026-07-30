@@ -240,7 +240,7 @@ Para conectar o Power BI Desktop à tabela consolidada na camada Gold:
 
 3. **Navegar até a Tabela Gold:**
    - No navegador de dados, acesse o caminho: `case_beanalytic` > `dados_macro`.
-   - Selecione a tabela `gold_bcb_macro_mensal` e confirme o carregamento.
+   - Selecione a tabela `gold_mensal` e confirme o carregamento.
 
 ---
 
