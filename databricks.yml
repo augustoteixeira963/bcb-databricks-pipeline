@@ -10,13 +10,20 @@ resources:
       name: "Pipeline BCB Macro - SELIC e IPCA (DAB Deployment)"
       description: "Workflow orquestrado da Arquitetura Medalhão consumindo dados das séries históricas do BCB."
       
+      environments:
+        - environment_key: Default
+          spec:
+            environment_version: "5"
+
       tasks:
         - task_key: 01_bronze
+          environment_key: Default
           description: "Ingestão incremental dos arquivos JSON do Unity Catalog Volume para tabelas Bronze via Auto Loader."
           spark_python_task:
             python_file: src/01_bronze_ingestion.py
           
         - task_key: 02_silver
+          environment_key: Default
           description: "Limpeza, padronização de datas, tipagem e carga idempotente via MERGE na camada Silver."
           depends_on:
             - task_key: 01_bronze
@@ -24,6 +31,7 @@ resources:
             python_file: src/02_silver_transformation.py
 
         - task_key: 03_gold
+          environment_key: Default
           description: "Consolidação analítica mensal com cálculo de Juro Real e IPCA Acumulado 12M via Window Functions."
           depends_on:
             - task_key: 02_silver

@@ -22,21 +22,17 @@ nulos_pk = df_clean.filter(col("data_ref").isNull()).count()
 if nulos_pk > 0:
     raise ValueError(f"FALHA DE DQ: Encontrados {nulos_pk} registros com 'data_ref' nula. Abortando MERGE.")
 
-# 5. Carga Idempotente (MERGE)
-try:
-    delta_table = DeltaTable.forName(spark, silver_table)
-    tabela_existe = True
-except Exception:
-    tabela_existe = False
+# 5. Carga Idempotente (MERGE) com Verificação Nativa do Catálogo
+tabela_existe = spark.catalog.tableExists(silver_table)
 
 if not tabela_existe:
-    # Primeira execução: Cria a tabela
+    # Primeira execução (ou pós DROP TABLE): Cria a tabela Delta
     print("Tabela Silver não existe. Criando nova tabela Delta...")
-    df_clean.write.format("delta").saveAsTable(silver_table)
+    df_clean.write.format("delta").mode("overwrite").saveAsTable(silver_table)
 else:
     # Execuções subsequentes: MERGE garantindo idempotência
     print("Tabela Silver encontrada. Executando MERGE (Upsert)...")
-    
+    delta_table = DeltaTable.forName(spark, silver_table)
     (delta_table.alias("tgt")
         .merge(
             df_clean.alias("src"),

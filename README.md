@@ -37,6 +37,16 @@ O pipeline foi estruturado para garantir escalabilidade, rastreabilidade e facil
 *   **Decisão Técnica:** O Auto Loader gerencia a incrementalidade automaticamente via *checkpoints*, eliminando a necessidade de controle manual de estado.
 *   **Otimização de Custos:** Utilização do gatilho `availableNow=True` para converter o fluxo contínuo em lote (*batch*), ligando o *compute* apenas para processar a fila pendente e desligando em seguida.
 *   **Governança:** Acesso ao nome do arquivo de origem via coluna nativa `_metadata.file_path` do Unity Catalog, substituindo a função legada `input_file_name()`.
+*   **Verificação de Arquivos no Volume:**
+    ```sql
+    -- Listagem direta dos arquivos contidos no Volume do Unity Catalog
+    LIST '/Volumes/case_beanalytic/dados_macro/raw_files';
+
+    -- Consulta para verificar os arquivos de origem mapeados na tabela Bronze
+    SELECT DISTINCT arquivo_origem, count(*) AS total_registros 
+    FROM case_beanalytic.dados_macro.bronze_bcb 
+    GROUP BY arquivo_origem;
+    ```
 
 ### 5. Camada Silver (Limpeza e Idempotência)
 *   **Tecnologia:** PySpark + Delta Lake.
@@ -69,14 +79,45 @@ Para reprocessamento ou carga histórica retroativa (backfill), o pipeline adota
 
 ---
 
-## Garantia de Qualidade de Dados (Data Quality)
+## Checagens de Qualidade de Dados (Data Quality) e Evidências de Falha
 
-Foram implementadas travas de segurança rigorosas com quebra explícita de execução (`raise ValueError`) em pontos críticos da esteira:
+O pipeline implementa checagens de qualidade de dados com quebra explícita de execução (`raise ValueError`) em cada camada da esteira. O descumprimento de qualquer regra interrompe imediatamente a execução do job.
 
-1.  **Fronteira Externa:** Validação de *payload* vazio no momento da extração da API do BCB.
-2.  **Fronteira Bronze:** Validação volumétrica cruzada. O *job* é interrompido caso o Auto Loader carregue uma tabela Bronze vazia.
-3.  **Fronteira Silver:** Prevenção de corrupção estrutural. O `MERGE` é abortado antes da execução caso existam registros com a chave primária (`data_ref`) nula.
-4.  **Fronteira Gold:** Bloqueio de processamento caso a camada Silver não forneça dados para cruzamento.
+### Checagem 1: Validação de Payload Vazio na Extração (Fronteira Externa)
+- **Localização:** `extract/00_extracao_local.py` (linha 32)
+- **Regra:** Se a API do BCB retornar um array vazio `[]`, o script interrompe o processo para impedir que arquivos inválidos sejam criados.
+- **Simulação da Falha:** Passar uma URL com intervalo de datas sem registros ou mockar o retorno da API para `[]`.
+- **Evidência do Erro Gerado:**
+  ```text
+  ValueError: Payload vazio retornado da URL: https://api.bcb.gov.br/dados/serie/bcdata.sgs.11/dados?...
+  ```
+
+### Checagem 2: Validação de Tabela Bronze Vazia (Fronteira Bronze -> Silver)
+- **Localização:** `src/01_bronze_ingestion.py` (linha 40)
+- **Regra:** Após o término da leitura pelo Auto Loader, verifica se a tabela Bronze possui ao menos 1 registro. Se a contagem for zero, a execução é abortada.
+- **Simulação da Falha:** Apontar a ingestão para um Volume ou diretório vazio.
+- **Evidência do Erro Gerado:**
+  ```text
+  ValueError: FALHA DE DQ: A tabela Bronze está vazia após a ingestão. Verifique os arquivos no Volume.
+  ```
+
+### Checagem 3: Integridade da Chave Primária na Silver (Fronteira Silver -> MERGE)
+- **Localização:** `src/02_silver_transformation.py` (linha 22)
+- **Regra:** Verifica a presença de valores nulos na coluna `data_ref` (chave de negócio). Se houver nulos, a instrução `MERGE INTO` é abortada antes de alterar a tabela de destino.
+- **Simulação da Falha:** Inserir um registro com a data formatada incorretamente (exemplo: `"data": "invalid_date"`), o que faz a conversão `to_date` gerar um valor `NULL`.
+- **Evidência do Erro Gerado:**
+  ```text
+  ValueError: FALHA DE DQ: Encontrados 1 registros com 'data_ref' nula. Abortando MERGE.
+  ```
+
+### Checagem 4: Disponibilidade de Dados para a Camada Gold (Fronteira Silver -> Gold)
+- **Localização:** `src/03_gold_aggregation.py` (linha 11)
+- **Regra:** Interrompe o processamento analítico se a camada Silver estiver zerada.
+- **Simulação da Falha:** Executar o script da camada Gold antes do processamento da Silver ou com a tabela Silver truncada.
+- **Evidência do Erro Gerado:**
+  ```text
+  ValueError: FALHA DE DQ: Camada Silver vazia. Abortando processamento Gold.
+  ```
 
 ---
 
@@ -87,8 +128,20 @@ Foram implementadas travas de segurança rigorosas com quebra explícita de exec
 *   Conta no Databricks com Unity Catalog ativado.
 *   Databricks CLI instalado (opcional, para uso do DAB/SDK).
 
+---
+
 ### Etapa 1: Extração Local e Upload Automático
-1. Navegue até a raiz do projeto e ative seu ambiente virtual:
+
+#### Como Gerar o Personal Access Token (PAT) e Definir Permissões (Scopes)
+1. No workspace Databricks (navegador), acesse o perfil no canto superior direito > **Settings** (Configurações).
+2. Vá em **Developer** (Desenvolvedor) > seção **Access tokens** > clique em **Manage** > **Generate new token**.
+3. Na seleção de escopos (scopes), marque obrigatoriamente:
+   - **`Other APIs`**: Permite acesso às APIs de Arquivos/Volumes e Databricks Asset Bundles (DABs).
+   - **`BI Tools`**: Permite acesso para conexões via SQL Warehouse e Power BI.
+4. Clique em **Generate** e copie o token gerado.
+
+#### Execução do Upload
+1. Ative o ambiente virtual Python:
    ```bash
    uv venv
    # Ativação Windows:
@@ -100,19 +153,56 @@ Foram implementadas travas de segurança rigorosas com quebra explícita de exec
    ```bash
    pip install -r requirements.txt
    ```
-3. Execute o script de extração local:
+3. Execute a extração local da API do BCB:
    ```bash
    python extract/00_extracao_local.py
    ```
-4. Configure as variáveis de ambiente e faça o upload automático para o Volume:
+4. Configure as variáveis de ambiente e execute o Upload Automático via SDK:
    ```bash
    # Windows (PowerShell)
    $env:DATABRICKS_HOST="https://<seu-workspace>.cloud.databricks.com"
    $env:DATABRICKS_TOKEN="dapi..."
+   $env:DATABRICKS_VOLUME_PATH="/Volumes/case_beanalytic/dados_macro/raw_files"
+   
    python extract/01_upload_to_volume.py
    ```
 
+#### Solução de Problemas Conhecidos (Troubleshooting)
+
+Abaixo estão listados os principais erros observados durante a configuração e suas respectivas correções:
+
+1. **Erro: `Access tokens scopes must be selected`**
+   - **Causa:** Nenhum escopo foi selecionado na criação do token no Databricks.
+   - **Solução:** Marcar as opções **`Other APIs`** e **`BI Tools`** no momento de gerar o token.
+
+2. **Erro: `FAILED to initialize Databricks SDK client: host is required`**
+   - **Causa:** Variáveis de ambiente com a URL do workspace e token não foram declaradas no terminal ativo.
+   - **Solução:** Executar a atribuição das variáveis `$env:DATABRICKS_HOST` e `$env:DATABRICKS_TOKEN` no PowerShell antes de rodar o script.
+
+3. **Erro: `ModuleNotFoundError: No module named 'databricks'`**
+   - **Causa:** O pacote `databricks-sdk` não foi instalado no ambiente virtual em execução.
+   - **Solução:** Ativar o ambiente `.venv` e executar `pip install -r requirements.txt`.
+
+4. **Erro: `Catalog 'main' does not exist`**
+   - **Causa:** O caminho de destino tenta usar um catálogo inexistente no workspace.
+   - **Solução:** Ajustar a variável `$env:DATABRICKS_VOLUME_PATH` para o caminho exato do volume criado no Unity Catalog (exemplo: `/Volumes/case_beanalytic/dados_macro/raw_files`).
+
+5. **Erro: `databricks: The term 'databricks' is not recognized...`**
+   - **Causa:** O executável do Databricks CLI não foi adicionado ao PATH do sistema.
+   - **Solução:** Copiar o arquivo `databricks.exe` para a pasta `.venv\Scripts\` ou para `$env:LOCALAPPDATA\Microsoft\WindowsApps`.
+
+6. **Erro: `FALHA DE DQ: A tabela Bronze está vazia após a ingestão...` ao resetar o ambiente**
+   - **Causa:** O Auto Loader armazena o histórico de arquivos já lidos na pasta `_checkpoints` dentro do Volume. Apagar apenas as tabelas com `DROP TABLE` faz com que o Auto Loader ignore os arquivos já lidos anteriormente, resultando em 0 linhas ingeridas.
+   - **Solução:** Ao realizar um reset completo do ambiente, remova também o diretório de checkpoints no Databricks SQL executando: `REMOVE '/Volumes/case_beanalytic/dados_macro/raw_files/_checkpoints';` (ou via Python Notebook: `dbutils.fs.rm("/Volumes/case_beanalytic/dados_macro/raw_files/_checkpoints", True)`).
+
+---
+
 ### Etapa 2: Deploy & Execução no Databricks
+
+#### Autenticação no CLI (Caso utilize DABs)
+```bash
+databricks auth login --host https://<seu-workspace>.cloud.databricks.com
+```
 
 #### Opção A: Deploy via Databricks Asset Bundle (DAB - Recomendado)
 ```bash
@@ -136,22 +226,21 @@ databricks bundle run bcb_macro_pipeline_workflow
 
 ## Consumo Analítico: Conexão no Power BI Desktop
 
-Para que a equipe de Analytics ou o Analista de BI conecte diretamente na tabela final consolidada (`Gold`), siga o passo a passo:
+Para conectar o Power BI Desktop à tabela consolidada na camada Gold:
 
-1. **Obtenha os Dados de Conexão do Databricks:**
-   - No Databricks, vá em **SQL Warehouses** (ou no seu Cluster de Compute) > guia **Connection Details**.
-   - Copie o **Server Hostname** (ex: `adb-xxxxxxxx.xx.azuredatabricks.net`) e o **HTTP Path** (ex: `/sql/1.0/warehouses/xxxxxxxxxxxx`).
+1. **Obter dados de conexão do Databricks:**
+   - No Databricks, acesse **SQL Warehouses** (ou o cluster em uso) e abra a guia **Connection Details**.
+   - Copie o **Server Hostname** e o **HTTP Path**.
 
 2. **Conectar pelo Power BI Desktop:**
    - Abra o Power BI Desktop e selecione **Obter Dados (Get Data)** > **Databricks**.
-   - Insira o **Server Hostname** e o **HTTP Path**.
-   - Em Modo de Conectividade de Dados, escolha **DirectQuery** (para consultas em tempo real) ou **Import** (para carregar em memória).
-   - Autentique-se utilizando **Personal Access Token (PAT)** ou **Azure Active Directory / OAuth**.
+   - Preencha o **Server Hostname** e o **HTTP Path**.
+   - Selecione o modo de conectividade (DirectQuery ou Import).
+   - Autentique-se utilizando o **Personal Access Token (PAT)**.
 
 3. **Navegar até a Tabela Gold:**
-   - No Navegador, expanda o catálogo e o schema do Unity Catalog: `main` > `default`.
-   - Selecione a tabela final: `gold_bcb_macro_mensal`.
-   - Clique em **Carregar** para iniciar a criação de dashboards de acompanhamento do Juro Real e IPCA Acumulado.
+   - No navegador de dados, acesse o caminho: `case_beanalytic` > `dados_macro`.
+   - Selecione a tabela `gold_bcb_macro_mensal` e confirme o carregamento.
 
 ---
 
